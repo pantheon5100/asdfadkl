@@ -21,6 +21,7 @@ import torch.utils.data.distributed
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import torchvision.models as models
+from torch.utils.tensorboard import SummaryWriter
 
 import moco.loader
 import moco.builder
@@ -96,6 +97,15 @@ parser.add_argument('--aug-plus', action='store_true',
                     help='use moco v2 data augmentation')
 parser.add_argument('--cos', action='store_true',
                     help='use cosine lr schedule')
+
+
+SUPPORT_METHOD = ["mocov2",
+                "simmoco",
+                "simco",
+                "simclr"]
+# 
+parser.add_argument('--method', default='mocov2', choices=SUPPORT_METHOD, type=str, required=True,
+                    help='method name')
 
 
 def main():
@@ -196,6 +206,7 @@ def main_worker(gpu, ngpus_per_node, args):
                                 momentum=args.momentum,
                                 weight_decay=args.weight_decay)
 
+    summary_writer = SummaryWriter(comment=f"-{args.method}") if args.rank == 0 else None
     # optionally resume from a checkpoint
     if args.resume:
         if os.path.isfile(args.resume):
@@ -248,6 +259,19 @@ def main_worker(gpu, ngpus_per_node, args):
         traindir,
         moco.loader.TwoCropsTransform(transforms.Compose(augmentation)))
 
+
+    valdir = os.path.join(args.data, 'val')
+    
+    val_loader = torch.utils.data.DataLoader(
+        datasets.ImageFolder(valdir, transforms.Compose([
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            normalize,
+        ])),
+        batch_size=args.batch_size, shuffle=False,
+        num_workers=args.workers, pin_memory=True)
+
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
     else:
@@ -257,13 +281,29 @@ def main_worker(gpu, ngpus_per_node, args):
         train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
         num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True)
 
+    iters_per_epoch = len(train_loader)
+    if args.rank == 0:
+        
+        ckpt_name = f"./ckpt/{args.method}/"
+        os.makedirs(ckpt_name, exist_ok=True)
+
+    # acc1, acc5 = validate(val_loader, model, criterion, args)
+
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             train_sampler.set_epoch(epoch)
         adjust_learning_rate(optimizer, epoch, args)
 
         # train for one epoch
-        train(train_loader, model, criterion, optimizer, epoch, args)
+        train(train_loader, model, criterion, optimizer, summary_writer, epoch, args)
+
+        #============== evaluate on validation set==============
+        acc1, acc5 = validate(val_loader, model, criterion, args)
+        if args.rank == 0:
+            summary_writer.add_scalar("val_acc1", acc1.item(), (epoch+1) * iters_per_epoch )
+            summary_writer.add_scalar("val_acc5", acc5.item(), (epoch+1) * iters_per_epoch )
+
+        #======================================================
 
         if not args.multiprocessing_distributed or (args.multiprocessing_distributed
                 and args.rank % ngpus_per_node == 0):
@@ -272,10 +312,58 @@ def main_worker(gpu, ngpus_per_node, args):
                 'arch': args.arch,
                 'state_dict': model.state_dict(),
                 'optimizer' : optimizer.state_dict(),
-            }, is_best=False, filename='checkpoint_{:04d}.pth.tar'.format(epoch))
+            }, is_best=False, filename=os.path.join(ckpt_name, 'checkpoint_{:04d}.pth.tar'.format(epoch)))
+    
+    if args.rank == 0:
+        summary_writer.close()
 
 
-def train(train_loader, model, criterion, optimizer, epoch, args):
+
+def validate(val_loader, model, criterion, args):
+    batch_time = AverageMeter('Time', ':6.3f')
+    losses = AverageMeter('Loss', ':.4e')
+    top1 = AverageMeter('Acc@1', ':6.2f')
+    top5 = AverageMeter('Acc@5', ':6.2f')
+    progress = ProgressMeter(
+        len(val_loader),
+        [batch_time, losses, top1, top5],
+        prefix='Test: ')
+
+    # switch to evaluate mode
+    model.eval()
+
+    with torch.no_grad():
+        end = time.time()
+        for i, (images, target) in enumerate(val_loader):
+            if args.gpu is not None:
+                images = images.cuda(args.gpu, non_blocking=True)
+            target = target.cuda(args.gpu, non_blocking=True)
+
+            # compute output
+            output = model(images, None, eval_method=True)
+            loss = criterion(output, target)
+
+            # measure accuracy and record loss
+            acc1, acc5 = accuracy(output, target, topk=(1, 5))
+            losses.update(loss.item(), images.size(0))
+            top1.update(acc1[0], images.size(0))
+            top5.update(acc5[0], images.size(0))
+
+            # measure elapsed time
+            batch_time.update(time.time() - end)
+            end = time.time()
+
+            # if i % args.print_freq == 0:
+            #     progress.display(i)
+
+        # TODO: this should also be done with the ProgressMeter
+        # print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'
+        #       .format(top1=top1, top5=top5))
+
+    return top1.avg, top5.avg
+
+
+def train(train_loader, model, criterion, optimizer, summary_writer, epoch, args):
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
     losses = AverageMeter('Loss', ':.4e')
@@ -289,25 +377,54 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
     # switch to train mode
     model.train()
 
+    iters_per_epoch = len(train_loader)
+
     end = time.time()
-    for i, (images, _) in enumerate(train_loader):
+    for i, (images, targets) in enumerate(train_loader):
         # measure data loading time
         data_time.update(time.time() - end)
 
         if args.gpu is not None:
             images[0] = images[0].cuda(args.gpu, non_blocking=True)
             images[1] = images[1].cuda(args.gpu, non_blocking=True)
+            targets = targets.cuda(args.gpu, non_blocking=True)
 
         # compute output
-        output, target = model(im_q=images[0], im_k=images[1])
-        loss = criterion(output, target)
+        if args.method == "mocov2":
+            output, target, classifier_output = model(im_q=images[0], im_k=images[1])
+            loss = criterion(output, target)
+        elif args.method == "simmoco":
+            loss, output, target, classifier_output = model(im_q=images[0], im_k=images[1])
+        
+        elif args.method == "simco":
+            loss, classifier_output = model(im_q=images[0], im_k=images[1])
+
+        elif args.method == "simclr":
+            loss, classifier_output = model(im_q=images[0], im_k=images[1])
+
+
+        #===== online classifier loss add=======================
+        loss_classifier = criterion(classifier_output, targets)
+        loss += loss_classifier
+
+        acc1, acc5 = accuracy(classifier_output, targets, topk=(1, 5))
+
+        if args.rank == 0:
+            summary_writer.add_scalar("loss", loss.item(), epoch * iters_per_epoch + i)
+            summary_writer.add_scalar("train_acc1", acc1.item(), epoch * iters_per_epoch + i)
+            summary_writer.add_scalar("train_acc5", acc5.item(), epoch * iters_per_epoch + i)
+
+        #==============================
 
         # acc1/acc5 are (K+1)-way contrast classifier accuracy
         # measure accuracy and record loss
-        acc1, acc5 = accuracy(output, target, topk=(1, 5))
-        losses.update(loss.item(), images[0].size(0))
-        top1.update(acc1[0], images[0].size(0))
-        top5.update(acc5[0], images[0].size(0))
+        if args.method == "mocov2":
+            acc1, acc5 = accuracy(output, target, topk=(1, 5))
+            losses.update(loss.item(), images[0].size(0))
+            top1.update(acc1[0], images[0].size(0))
+            top5.update(acc5[0], images[0].size(0))
+
+
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
@@ -389,14 +506,19 @@ def accuracy(output, target, topk=(1,)):
 
         _, pred = output.topk(maxk, 1, True, True)
         pred = pred.t()
-        correct = pred.eq(target.view(1, -1).expand_as(pred))
+        # correct = pred.eq(target.view(1, -1).expand_as(pred))
+        correct = pred.eq(target.reshape(1, -1).expand_as(pred))
+
 
         res = []
         for k in topk:
-            correct_k = correct[:k].view(-1).float().sum(0, keepdim=True)
+            # correct_k = correct[:k].view(-1).float().sum(0, keepdim=True)
+            correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
+
             res.append(correct_k.mul_(100.0 / batch_size))
         return res
 
 
 if __name__ == '__main__':
+    os.makedirs("./ckpt", exist_ok=True)
     main()

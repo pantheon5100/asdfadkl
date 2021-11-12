@@ -1,7 +1,8 @@
-./moco/__pycache__
+moco/__pycache__
 
-./runs
+runs/*
 
 *.__pycache__
 *.pyc
 
+ckpt/*
