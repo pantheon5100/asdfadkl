@@ -1,0 +1,7 @@
+./moco/__pycache__
+
+./runs
+
+*.__pycache__
+*.pyc
+
