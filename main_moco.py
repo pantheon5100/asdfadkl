@@ -168,7 +168,7 @@ def main_worker(gpu, ngpus_per_node, args):
     print("=> creating model '{}'".format(args.arch))
     model = moco.builder.MoCo(
         models.__dict__[args.arch],
-        args.moco_dim, args.moco_k, args.moco_m, args.moco_t, args.mlp)
+        args.moco_dim, args.moco_k, args.moco_m, args.moco_t, args.mlp, method=args.method)
     print(model)
 
     if args.distributed:
@@ -391,16 +391,16 @@ def train(train_loader, model, criterion, optimizer, summary_writer, epoch, args
 
         # compute output
         if args.method == "mocov2":
-            output, target, classifier_output = model(im_q=images[0], im_k=images[1])
+            output, target, classifier_output = model(im_q=images[0], im_k=images[1], eval_method=False)
             loss = criterion(output, target)
         elif args.method == "simmoco":
-            loss, output, target, classifier_output = model(im_q=images[0], im_k=images[1])
+            loss, output, target, classifier_output = model(im_q=images[0], im_k=images[1], eval_method=False)
         
         elif args.method == "simco":
-            loss, classifier_output = model(im_q=images[0], im_k=images[1])
+            loss, classifier_output = model(im_q=images[0], im_k=images[1], eval_method=False)
 
         elif args.method == "simclr":
-            loss, classifier_output = model(im_q=images[0], im_k=images[1])
+            loss, classifier_output = model(im_q=images[0], im_k=images[1], eval_method=False)
 
 
         #===== online classifier loss add=======================
