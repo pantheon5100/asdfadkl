@@ -6,3 +6,6 @@ runs/*
 *.pyc
 
 ckpt/*
+
+*.pth.tar
+*.pth

@@ -393,18 +393,52 @@ def simco_loss_func(
     # targets = torch.zeros(query.size(0), device=query.device, dtype=torch.long)
     # return F.cross_entropy(logits, targets)
 
+    # # intra
+    # b = query.size(0)
+    # pos = torch.einsum("nc,nc->n", [query, key]).unsqueeze(-1)
+
+    # # Selecte the intra negative samples according the updata time, 
+    # neg = torch.einsum("nc,ck->nk", [query, queueintra])
+    # neg.fill_diagonal_(0) # moco_2queue-tau_99to99-interq_65k-intraq_256_currentkeySaveLoad
+
+    # logits = torch.cat([pos, neg], dim=1)
+    # logits_intra = logits / temperature
+
+    # prob_intra = F.softmax(logits_intra, dim=1)
+
+
+    # ==================== has constant 1 ===================================
     # intra
-    b = query.size(0)
-    pos = torch.einsum("nc,nc->n", [query, key]).unsqueeze(-1)
+    # b = query.size(0)
+    # pos = torch.einsum("nc,nc->n", [query, key]).unsqueeze(-1)
 
-    # Selecte the intra negative samples according the updata time, 
-    neg = torch.einsum("nc,ck->nk", [query, queueintra])
-    neg.fill_diagonal_(0) # moco_2queue-tau_99to99-interq_65k-intraq_256_currentkeySaveLoad
+    # # Selecte the intra negative samples according the updata time, 
+    # neg = torch.einsum("nc,ck->nk", [query, queueintra])
+    # neg.fill_diagonal_(0) # moco_2queue-tau_99to99-interq_65k-intraq_256_currentkeySaveLoad
 
-    logits = torch.cat([pos, neg], dim=1)
-    logits_intra = logits / temperature
+    # logits = torch.cat([pos, neg], dim=1)
+    # logits_intra = logits / temperature
 
-    prob_intra = F.softmax(logits_intra, dim=1)
+    # prob_intra = F.softmax(logits_intra, dim=1)
+
+    # inter_intra = 1 / (1 - prob_intra[:, 0]) # setting tau inter to infinity
+    # loss = - F.log_softmax(logits_intra, dim=-1)[:, 0]
+
+    # ========================================================================
+
+    # ==================== Remove the constent in blow =======================
+    query = F.normalize(query, dim=-1)
+    key = F.normalize(key, dim=-1)
+
+
+    logits = torch.einsum("nc,kc->nk", [query, key])
+    logits = logits / temperature
+    prob_intra = F.softmax(logits, dim=1)
+    inter_intra = 1 / (1 - prob_intra.diag()) # setting tau inter to infinity
+
+    loss = - F.log_softmax(logits, dim=-1).diag()
+
+    # ========================================================================
 
     # inter
     # neg = torch.einsum("nc,ck->nk", [query, queueinter])
@@ -415,10 +449,10 @@ def simco_loss_func(
     # prob_inter = F.softmax(logits_inter, dim=1)
 
     # inter_intra = (1 - prob_inter[:, 0]) / (1 - prob_intra[:, 0])
-    inter_intra = 1 / (1 - prob_intra[:, 0]) # setting tau inter to infinity
+    # inter_intra = 1 / (1 - prob_intra[:, 0]) # setting tau inter to infinity
 
     # loss = -torch.log(prob_intra[:, 0]+1e-8)
-    loss = - torch.nn.functional.log_softmax(logits_intra, dim=-1)[:, 0]
+    # loss = - torch.nn.functional.log_softmax(logits_intra, dim=-1)[:, 0]
 
     loss = inter_intra.detach() * loss
     loss = loss.mean()

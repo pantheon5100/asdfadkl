@@ -171,6 +171,8 @@ def main_worker(gpu, ngpus_per_node, args):
         args.moco_dim, args.moco_k, args.moco_m, args.moco_t, args.mlp, method=args.method)
     print(model)
 
+    # import ipdb; ipdb.set_trace()
+
     if args.distributed:
         # For multiprocessing distributed, DistributedDataParallel constructor
         # should always set the single device scope, otherwise,
@@ -202,9 +204,22 @@ def main_worker(gpu, ngpus_per_node, args):
     # define loss function (criterion) and optimizer
     criterion = nn.CrossEntropyLoss().cuda(args.gpu)
 
-    optimizer = torch.optim.SGD(model.parameters(), args.lr,
+    #####============== get different lr schedule for each layer
+    classifier_params = []
+    remained_params = []
+    for name, param in model.named_parameters():
+        if 'classifier' in name:
+            classifier_params.append(param)
+        else:
+            remained_params.append(param)
+    optimizer = torch.optim.SGD([{'params': remained_params}, {'params': classifier_params}], lr=args.lr,
                                 momentum=args.momentum,
                                 weight_decay=args.weight_decay)
+    #####======================== 
+
+    # optimizer = torch.optim.SGD(model.parameters(), args.lr,
+    #                             momentum=args.momentum,
+    #                             weight_decay=args.weight_decay)
 
     summary_writer = SummaryWriter(comment=f"-{args.method}") if args.rank == 0 else None
     # optionally resume from a checkpoint
@@ -302,6 +317,8 @@ def main_worker(gpu, ngpus_per_node, args):
         if args.rank == 0:
             summary_writer.add_scalar("val_acc1", acc1.item(), (epoch+1) * iters_per_epoch )
             summary_writer.add_scalar("val_acc5", acc5.item(), (epoch+1) * iters_per_epoch )
+            summary_writer.add_scalar("lr_encoder", optimizer.param_groups[0]['lr'], (epoch+1) * iters_per_epoch)
+            summary_writer.add_scalar("lr_classifier", optimizer.param_groups[1]['lr'], (epoch+1) * iters_per_epoch)
 
         #======================================================
 
@@ -494,9 +511,11 @@ def adjust_learning_rate(optimizer, epoch, args):
     else:  # stepwise lr schedule
         for milestone in args.schedule:
             lr *= 0.1 if epoch >= milestone else 1.
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = lr
-
+    # import ipdb; ipdb.set_trace()
+    # for param_group in optimizer.param_groups:
+    #     param_group['lr'] = lr
+    optimizer.param_groups[0]['lr'] = lr
+    optimizer.param_groups[1]['lr'] = 0.3
 
 def accuracy(output, target, topk=(1,)):
     """Computes the accuracy over the k top predictions for the specified values of k"""
